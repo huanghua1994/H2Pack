@@ -181,10 +181,10 @@ void H2P_gen_rand_sparse_mat_trans(
 }
 
 // Calculate y^T := A^T * x^T, where A is a sparse matrix, x and y are row-major matrices
-void H2P_calc_sparse_mm_trans(
+void H2P_calc_sparse_mm_trans_OMP(
     const int m, const int n, const int k,
     H2P_dense_mat_p A_valbuf, H2P_int_vec_p A_idxbuf,
-    DTYPE *x, const int ldx, DTYPE *y, const int ldy
+    DTYPE *x, const int ldx, DTYPE *y, const int ldy, const int n_thread
 )
 {
     const DTYPE *val = A_valbuf->data;
@@ -192,7 +192,8 @@ void H2P_calc_sparse_mm_trans(
     const int *col_idx = row_ptr + (n + 1);  // A is k-by-n
     // Doing a naive OpenMP CSR SpMM here is good enough, using MKL SpBLAS is actually
     // slower, probably due to the cost of optimizing the storage of sparse matrix
-    #pragma omp parallel for schedule(static)
+    #pragma omp parallel if(n_thread > 1) num_threads(n_thread)
+    #pragma omp for schedule(static)
     for (int i = 0; i < m; i++)
     {
         DTYPE *x_i = x + i * ldx;

@@ -124,10 +124,11 @@ void H2P_generate_proxy_point_nlayer(
     int max_nnz_col = 32;
     H2P_gen_rand_sparse_mat_trans(max_nnz_col, tmpA->ncol, tmpA->nrow, rndmat_val, rndmat_idx);
     H2P_dense_mat_resize(tmpA1, tmpA->nrow, tmpA->nrow);
-    H2P_calc_sparse_mm_trans(
+    H2P_calc_sparse_mm_trans_OMP(
         tmpA->nrow, tmpA->nrow, tmpA->ncol, rndmat_val, rndmat_idx,
-        tmpA->data, tmpA->ld, tmpA1->data, tmpA1->ld
+        tmpA->data, tmpA->ld, tmpA1->data, tmpA1->ld, n_thread
     );
+    H2P_dense_mat_normalize_columns(tmpA1, QR_buff);
     et = get_wtime_sec();
     timers[GEN_PP_KRNL_TIMER_IDX] += et - st;
     // (3) Calculate ID approximation on the reduced matrix and select skeleton points in X

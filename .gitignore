@@ -55,3 +55,5 @@ dkms.conf
 lib/
 include/
 install/
+*.bin
+*.dat

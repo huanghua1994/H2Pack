@@ -130,12 +130,13 @@ void H2P_gen_rand_sparse_mat_trans(
 //              stores col_idx.
 //   x, ldx   : m-by-k row-major dense matrix, leading dimension ldx
 //   ldy      : Leading dimension of y
+//   n_thread : Number of OpenMP threads
 // Output parameter:
 //   y : m-by-n row-major dense matrix, leading dimension ldy
-void H2P_calc_sparse_mm_trans(
+void H2P_calc_sparse_mm_trans_OMP(
     const int m, const int n, const int k,
     H2P_dense_mat_p A_valbuf, H2P_int_vec_p A_idxbuf,
-    DTYPE *x, const int ldx, DTYPE *y, const int ldy
+    DTYPE *x, const int ldx, DTYPE *y, const int ldy, const int n_thread
 );
 
 // Generate normal distribution random number, Marsaglia polar method

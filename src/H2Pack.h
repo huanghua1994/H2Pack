@@ -52,6 +52,8 @@
 // H2Pack build H2/HSS representation with sample points
 #include "H2Pack_build_with_sample_point.h"
 
+#include "H2Pack_build_random.h"
+
 // Linear algebra library (BLAS, LAPACK) wrapper header
 #include "linalg_lib_wrapper.h"
 
