@@ -467,15 +467,10 @@ int H2P_select_sample_point_r(
 {
     ASSERT_PRINTF(h2pack->pt_dim == h2pack->xpt_dim, "Sample point algorithm does not support RPY with different radii yet\n");
 
-    int k        = h2pack->max_leaf_points * 2 + 300;   // +300 is from Difeng's MATLAB code
+    int k        = h2pack->max_leaf_points * 2 + 200;
     int pt_dim   = h2pack->pt_dim;
     int krnl_dim = h2pack->krnl_dim;
     int n_thread = h2pack->n_thread;
-    DTYPE *root_enbox = h2pack->root_enbox;
-    DTYPE L = root_enbox[pt_dim];
-    for (int i = 1; i < pt_dim; i++) 
-        L = (L > root_enbox[pt_dim + i]) ? root_enbox[pt_dim + i] : L;
-    L /= 6.0;  // Don't know why we need this, just copy from Difeng's MATLAB code
 
     H2P_dense_mat_p coord0, coord1, coord1s, A0, A1, U, UA, QR_buff;
     H2P_int_vec_p sample_idx, sub_idx, ID_buff;
@@ -497,11 +492,14 @@ int H2P_select_sample_point_r(
     srand48(19241112);
 
     // Create two sets of points in unit boxes
-    DTYPE coord1_shift = L / tau;
+    int *max_level_nodes = h2pack->level_nodes + h2pack->max_level * h2pack->n_leaf_node;
+    int ml_node_0 = max_level_nodes[0];
+    DTYPE *ml_node_0_enbox = h2pack->enbox + ml_node_0 * 2 * pt_dim;
+    DTYPE L = ml_node_0_enbox[pt_dim];
     for (int i = 0; i < k * pt_dim; i++)
     {
         coord0->data[i] = L * (DTYPE) drand48();
-        coord1->data[i] = L * (DTYPE) drand48() + coord1_shift;
+        coord1->data[i] = L * (DTYPE) drand48() + L;
     }
 
     // Find an r value by checking approximation error to A
@@ -589,7 +587,6 @@ int H2P_select_sample_point_r(
         }
         err_fnorm = DSQRT(err_fnorm);
         relerr = err_fnorm / A0_fnorm;
-        if (h2pack->print_dbginfo) DEBUG_PRINTF("r = %d, relerr = %e\n", r, relerr);
 
         if ((relerr < UA_stop_err) || (n_sample >= max_coord1_npt)) flag = 1; else r++;
     }  // End "while (flag == 0)"
@@ -607,6 +604,45 @@ int H2P_select_sample_point_r(
     H2P_int_vec_destroy(&ID_buff);
     return r;
 }
+
+// Find the maximum distance s.t. for any r <= max_d, if |x-y| <= r,
+// k(x, y) / k(x, x) >= machine precision. For scalar kernel only.
+// Kernel should be translation-invariant and k(r) should decrease when r increases.
+DTYPE H2P_find_zero_kernel_dist(
+    const void *krnl_param, kernel_eval_fptr krnl_eval, const int pt_dim,
+    const DTYPE root_enbox_size, const DTYPE reltol
+)
+{
+    DTYPE *workbuf = (DTYPE *) malloc(sizeof(DTYPE) * 3 * pt_dim);
+    DTYPE *c0 = workbuf;
+    DTYPE *c1 = workbuf + pt_dim;
+    DTYPE *k  = workbuf + pt_dim * 2;
+    krnl_eval(c0, 1, 1, c1, 1, 1, krnl_param, k, 1);
+    DTYPE max_kval = k[0];
+    DTYPE min_kval = k[0] * reltol;
+    c1[0] = root_enbox_size;
+    krnl_eval(c0, 1, 1, c1, 1, 1, krnl_param, k, 1);
+    if (k[0] >= min_kval)
+    {
+        // No point pair will makr k(r) too small, fast return
+        free(workbuf);
+        return root_enbox_size * 2;
+    }
+    DTYPE left = reltol, right = root_enbox_size;
+    while (right - left > 1e-4)
+    {
+        DTYPE mid = (left + right) * 0.5;
+        c1[0] = mid;
+        krnl_eval(c0, 1, 1, c1, 1, 1, krnl_param, k, 1);
+        if (k[0] < min_kval) right = mid;
+        else                 left  = mid;
+    }
+    free(workbuf);
+    return right;
+}
+
+// In AFN_precond.c
+void Qpart_DTYPE_int_key_val(DTYPE *key, int *val, const int l, const int r, const int k);
 
 // Select sample points for constructing H2 projection and skeleton matrices 
 void H2P_select_sample_point(
@@ -806,6 +842,170 @@ void H2P_select_sample_point(
     et = get_wtime_sec();
     t_down = et - st;
 
+    // Some optimizations for Gaussian kernel
+    // 6. Prune far away points for small bandwidth
+    int prune_sp = 1;
+    int min_num_ss = 100;
+    DTYPE root_enbox_width = h2pack->root_enbox[pt_dim];
+    DTYPE max_d_reltol = 1e-10;
+    DTYPE max_d = H2P_find_zero_kernel_dist(krnl_param, krnl_eval, pt_dim, root_enbox_width, max_d_reltol);
+    #pragma omp parallel
+    {
+        DTYPE center[16];
+        H2P_int_vec_p ss_idx, idx_tmp;
+        H2P_dense_mat_p sp_coord, dist2;
+        H2P_int_vec_init(&ss_idx, 1024);
+        H2P_int_vec_init(&idx_tmp, 1024);
+        H2P_dense_mat_init(&sp_coord, xpt_dim, 1024);
+        H2P_dense_mat_init(&dist2, 1, 1024);
+
+        #pragma omp for schedule (dynamic)
+        for (int i = 0; i < n_node; i++)
+        {
+            int num_ss_i = sample_idx[i]->length;
+            if (num_ss_i < min_num_ss || prune_sp == 0) continue;
+            // (1) Calculate the center of this enbox
+            DTYPE *enbox_i = h2pack->enbox + i * 2 * pt_dim;
+            DTYPE radius_i = 0.0;
+            for (int j = 0; j < pt_dim; j++)
+            {
+                center[j] = enbox_i[j] + 0.5 * enbox_i[pt_dim + j];
+                radius_i += enbox_i[pt_dim + j] * enbox_i[pt_dim + j];
+            }
+            radius_i = DSQRT(radius_i) * 0.5;
+            // (2) Calculate the distance from center to each sample point
+            H2P_dense_mat_resize(sp_coord, xpt_dim, num_ss_i);
+            H2P_gather_matrix_columns(
+                coord, n_point, sp_coord->data, sp_coord->ld,
+                xpt_dim, sample_idx[i]->data, num_ss_i
+            );
+            H2P_dense_mat_resize(dist2, 1, num_ss_i);
+            H2P_calc_pdist2_OMP(
+                &center[0], 1, 1, sp_coord->data, sp_coord->ld, num_ss_i,
+                pt_dim, dist2->data, dist2->ld, 1
+            );
+            // (3) Prune points that are too far away
+            H2P_int_vec_set_capacity(idx_tmp, num_ss_i);
+            idx_tmp->length = 0;
+            memset(idx_tmp->data, 0, sizeof(int) * num_ss_i);
+            int n_keep = 0;
+            DTYPE dist2_threshold = (radius_i + max_d) * (radius_i + max_d);
+            for (int j = 0; j < num_ss_i; j++)
+            {
+                if (dist2->data[j] > dist2_threshold) continue;
+                idx_tmp->data[j] = 1;
+                n_keep++;
+            }
+            // Too few points after prune, randomly add some points
+            if (n_keep < 10)
+            {
+                for (int j = 0; j < num_ss_i; j++)
+                {
+                    int idx = rand() % num_ss_i;
+                    if (idx_tmp->data[j] == 1) continue;
+                    idx_tmp->data[j] = 1;
+                    n_keep++;
+                }
+            }
+            // Copy kept points to sample_idx[i]
+            H2P_int_vec_set_capacity(ss_idx, n_keep);
+            ss_idx->length = 0;
+            for (int j = 0; j < num_ss_i; j++)
+            {
+                if (idx_tmp->data[j] == 0) continue;
+                H2P_int_vec_push_back(ss_idx, sample_idx[i]->data[j]);
+            }
+            H2P_int_vec_set_capacity(sample_idx[i], ss_idx->length);
+            memcpy(sample_idx[i]->data, ss_idx->data, sizeof(int) * ss_idx->length);
+            sample_idx[i]->length = ss_idx->length;
+        }
+
+        H2P_int_vec_destroy(&ss_idx);
+        H2P_int_vec_destroy(&idx_tmp);
+        H2P_dense_mat_destroy(&sp_coord);
+        H2P_dense_mat_destroy(&dist2);
+    }
+
+    // 7. Densify the selected sample points in the nearest far-field nodes
+    int density_sp = 1;
+    GET_ENV_INT_VAR(density_sp, "H2P_DENSITY_SP", "density_sp", 1, 0, 1);
+    #pragma omp parallel
+    {
+        DTYPE center[16], search_enbox[16], coord_tmp[16];
+        H2P_int_vec_p nff_idx, tmp_idx;
+        H2P_dense_mat_p nff_coord, dist2;
+        H2P_int_vec_init(&nff_idx, 1024);
+        H2P_int_vec_init(&tmp_idx, 1024);
+        H2P_dense_mat_init(&nff_coord, xpt_dim, 1024);
+        H2P_dense_mat_init(&dist2, 1, 1024);
+
+        #pragma omp for schedule (dynamic)
+        for (int i = 0; i < n_node; i++)
+        {
+            // (1) Search area: the 2nd layer of width L outside current node's enbox,
+            //     L == current node's enbox width (inadmissible nodes are in the 1st layer)
+            int num_ss_i = sample_idx[i]->length;
+            if (num_ss_i == 0 || density_sp == 0) continue;
+            DTYPE *enbox_i = h2pack->enbox + i * 2 * pt_dim;
+            for (int j = 0; j < pt_dim; j++)
+            {
+                center[j] = enbox_i[j] + 0.5 * enbox_i[pt_dim + j];
+                search_enbox[j] = enbox_i[j] - 2.0 * enbox_i[pt_dim + j];
+                search_enbox[pt_dim + j] = (1.0 + 2.0 * 2.0) * enbox_i[pt_dim + j];
+            }
+            // (2) Find all points that satisfy:
+            // (a) not selected as sample points yet (not in sample_idx[i])
+            // (b) in the search area (must be in the admissible nodes of current node)
+            H2P_int_vec_set_capacity(tmp_idx, n_point);
+            memset(tmp_idx->data, 0, sizeof(int) * n_point);
+            for (int j = 0; j < sample_idx[i]->length; j++)
+                tmp_idx->data[sample_idx[i]->data[j]] = 1;
+            nff_idx->length = 0;
+            for (int j = 0; j < adm_list[i]->length; j++)
+            {
+                int node_j = adm_list[i]->data[j];
+                int clu_js = pt_cluster[node_j * 2];
+                int clu_je = pt_cluster[node_j * 2 + 1];
+                for (int k = clu_js; k <= clu_je; k++)
+                {
+                    if (tmp_idx->data[k] == 1) continue;
+                    int flag = 1;
+                    for (int d = 0; d < pt_dim; d++)
+                    {
+                        DTYPE coord_k_d = coord[d * n_point + k];
+                        if (coord_k_d < search_enbox[d]) flag = 0;
+                        if (coord_k_d > search_enbox[d] + search_enbox[pt_dim + d]) flag = 0;
+                    }
+                    if (flag == 1) H2P_int_vec_push_back(nff_idx, k);
+                }
+            }
+            // (3) Find ext_size points in nff_idx that are closest to center
+            int ext_size = sample_idx[i]->length;
+            if (ext_size < 30 * r_down) ext_size = 30 * r_down;
+            if (ext_size > nff_idx->length) ext_size = nff_idx->length;
+            H2P_dense_mat_resize(nff_coord, xpt_dim, nff_idx->length);
+            H2P_gather_matrix_columns(
+                coord, n_point, nff_coord->data, nff_coord->ld,
+                xpt_dim, nff_idx->data, nff_idx->length
+            );
+            H2P_dense_mat_resize(dist2, 1, nff_idx->length);
+            H2P_calc_pdist2_OMP(
+                &center[0], 1, 1, nff_coord->data, nff_coord->ld, nff_coord->ncol,
+                pt_dim, dist2->data, dist2->ld, 1
+            );
+            Qpart_DTYPE_int_key_val(dist2->data, nff_idx->data, 0, nff_idx->length - 1, ext_size);
+            // (4) Add ext_size points to sample_idx[i]
+            nff_idx->length = ext_size;
+            H2P_int_vec_concatenate(sample_idx[i], nff_idx);
+        }  // End of i loop
+
+        H2P_int_vec_destroy(&nff_idx);
+        H2P_int_vec_destroy(&tmp_idx);
+        H2P_dense_mat_destroy(&nff_coord);
+        H2P_dense_mat_destroy(&dist2);
+    }
+
+    // Gather sample points for each node
     for (int i = 0; i < n_node; i++)
     {
         H2P_dense_mat_init(sample_pt + i, xpt_dim, sample_idx[i]->length);
@@ -813,19 +1013,18 @@ void H2P_select_sample_point(
             coord, n_point, sample_pt[i]->data, sample_pt[i]->ld,
             xpt_dim, sample_idx[i]->data, sample_idx[i]->length
         );
-    }
-
-    int max_sample_npt = 0, avg_sample_npt = 0, n_node_with_sample = 0;
-    for (int i = 0; i < n_node; i++)
-    {
-        max_sample_npt = (max_sample_npt > sample_pt[i]->ncol) ? max_sample_npt : sample_pt[i]->ncol;
-        avg_sample_npt += sample_pt[i]->ncol;
-        if (sample_pt[i]->ncol > 0) n_node_with_sample++;
-    }
-    avg_sample_npt /= n_node_with_sample;
+    }    
 
     if (h2pack->print_dbginfo)
     {
+        int max_sample_npt = 0, avg_sample_npt = 0, n_node_with_sample = 0;
+        for (int i = 0; i < n_node; i++)
+        {
+            max_sample_npt = (max_sample_npt > sample_pt[i]->ncol) ? max_sample_npt : sample_pt[i]->ncol;
+            avg_sample_npt += sample_pt[i]->ncol;
+            if (sample_pt[i]->ncol > 0) n_node_with_sample++;
+        }
+        avg_sample_npt /= n_node_with_sample;
         DEBUG_PRINTF("Select ri, bottom-up, top-down time = %.2f, %.2f, %.2f\n", t_ri, t_up, t_down);
         DEBUG_PRINTF("Max / average sample points per node = %d, %d\n", max_sample_npt, avg_sample_npt);
     }

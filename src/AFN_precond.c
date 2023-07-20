@@ -204,7 +204,7 @@ static void Qsort_int_DTYPE_key_val(int *key, DTYPE *val, const int l, const int
 }
 
 // Quick partitioning for (DTYPE, int) key-value pairs and get the first k smallest elements
-static void Qpart_DTYPE_int_key_val(DTYPE *key, int *val, const int l, const int r, const int k)
+void Qpart_DTYPE_int_key_val(DTYPE *key, int *val, const int l, const int r, const int k)
 {
     int i = l, j = r;
     DTYPE mid_key = key[(l + r) / 2];
