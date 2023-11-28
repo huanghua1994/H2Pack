@@ -130,7 +130,7 @@ void H2P_generate_proxy_point_nlayer(
     );
     H2P_dense_mat_normalize_columns(tmpA1, QR_buff);
     et = get_wtime_sec();
-    timers[GEN_PP_KRNL_TIMER_IDX] += et - st;
+    timers[GEN_SPMM_KRNL_TIMER_IDX] += et - st;
     // (3) Calculate ID approximation on the reduced matrix and select skeleton points in X
     st = get_wtime_sec();
     if (krnl_dim == 1)
@@ -257,9 +257,25 @@ void H2P_generate_proxy_point_nlayer(
             timers[GEN_PP_ID_TIMER_IDX]   += et - st;
 
             st = get_wtime_sec();
+            H2P_dense_mat_resize(tmpA1, pt_dim, Yp_coord->ncol);
+            copy_matrix(sizeof(DTYPE), pt_dim, Yp_coord->ncol, Yp_coord->data, Yp_coord->ld, tmpA1->data, tmpA1->ld, 0);
             H2P_dense_mat_select_columns(tmp_coord, skel_idx);
             H2P_dense_mat_resize(Yp_coord, pt_dim, tmp_coord->ncol);
             copy_matrix(sizeof(DTYPE), pt_dim, tmp_coord->ncol, tmp_coord->data, tmp_coord->ld, Yp_coord->data, Yp_coord->ld, 0);
+            // Check if Yp has new elements, if no we can quick exit
+            if (tmpA1->ncol == Yp_coord->ncol)
+            {
+                DTYPE diff = 0;
+                for (int k = 0; k < pt_dim; k++)
+                {
+                    DTYPE *Yp0_k = tmpA1->data    + tmpA1->ld    * k;
+                    DTYPE *Yp1_k = Yp_coord->data + Yp_coord->ld * k;
+                    #pragma omp simd
+                    for (int j = 0; j < tmpA1->ncol; j++)
+                        diff += (Yp0_k[j] - Yp1_k[j]) * (Yp0_k[j] - Yp1_k[j]);
+                }
+                if (diff < 1e-15) break;
+            }
             et = get_wtime_sec();
             timers[GEN_PP_MISC_TIMER_IDX] += et - st;
         }  // End of i loop
