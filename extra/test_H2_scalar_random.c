@@ -17,8 +17,6 @@ int main(int argc, char **argv)
     srand48(time(NULL));
     
     parse_scalar_params(argc, argv);
-    
-    double st, et;
 
     H2Pack_p h2pack;
     H2P_init(&h2pack, test_params.pt_dim, test_params.krnl_dim, QR_REL_NRM, &test_params.rel_tol);

@@ -141,7 +141,6 @@ void H2P_estimate_num_proxy_points(H2Pack_p h2pack, int **num_pp_)
     H2P_int_vec_init(&idx_buf2, Y0_size);
     int *num_pp = (int *) malloc(sizeof(int) * (max_level + 1));
     memset(num_pp, 0, sizeof(int) * (max_level + 1));
-    DTYPE maxL = h2pack->root_enbox[pt_dim];
     for (int i = min_adm_level; i <= max_level; i++)
     {
         int *level_i_nodes = level_nodes + i * n_leaf_node;
@@ -312,7 +311,7 @@ void H2P_build_H2_UJ_random(H2Pack_p h2pack)
     H2P_thread_buf_p *thread_buf = h2pack->tb;
     kernel_eval_fptr krnl_eval   = h2pack->krnl_eval;
 
-    DTYPE QR_stop_tol = h2pack->QR_stop_tol * 1e-2;
+    DTYPE QR_stop_tol = h2pack->QR_stop_tol * 1e-1;
     void *stop_param = NULL;
     if (stop_type == QR_RANK) 
         stop_param = &h2pack->QR_stop_rank;
@@ -402,6 +401,7 @@ void H2P_build_H2_UJ_random(H2Pack_p h2pack)
         {
             int *level_i_nodes = level_nodes + i * n_leaf_node;
             int level_i_n_node = level_n_node[i];
+            int n_thread_i = n_thread / level_i_n_node;
 
             // (1) Update row indices associated with clusters for current node
             tid_s = get_wtime_sec();
@@ -480,9 +480,11 @@ void H2P_build_H2_UJ_random(H2Pack_p h2pack)
                 tid_s = get_wtime_sec();
                 H2P_dense_mat_p spS_valbuf = QR_buff;  // QR_buff is not used now, use it as a buffer
                 H2P_int_vec_p   spS_idxbuf = ID_buff;  // ID_buff is not used now, use it as a buffer
-                int max_nnz_col = 32;
+                int max_nnz_col = 16;
                 int spS_k = adm_J_set_size;
-                int spS_n = (skel_coord->ncol * krnl_dim < num_pp[level]) ? skel_coord->ncol * krnl_dim : num_pp[level];
+                int spS_n = round(1.5 * num_pp[level]);
+                int spS_n2 = round(1.5 * skel_coord->ncol);
+                if (spS_n2 < spS_n) spS_n = spS_n2;
                 H2P_gen_rand_sparse_mat_trans(max_nnz_col, spS_k, spS_n, spS_valbuf, spS_idxbuf);
                 int *spS_rowptr = spS_idxbuf->data;
                 int *spS_colidx = spS_rowptr + (spS_n + 1);
@@ -558,7 +560,7 @@ void H2P_build_H2_UJ_random(H2Pack_p h2pack)
                 H2P_int_vec_set_capacity(ID_buff, 4 * AS->nrow);
                 H2P_ID_compress(
                     AS, stop_type, stop_param, &U[node], sub_idx, 
-                    1, QR_buff->data, ID_buff->data, krnl_dim
+                    n_thread_i, QR_buff->data, ID_buff->data, krnl_dim
                 );
                 tid_e = get_wtime_sec();
                 tid_id += tid_e - tid_s;
