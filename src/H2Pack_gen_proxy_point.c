@@ -130,7 +130,7 @@ void H2P_generate_proxy_point_nlayer(
     );
     H2P_dense_mat_normalize_columns(tmpA1, QR_buff);
     et = get_wtime_sec();
-    timers[GEN_SPMM_KRNL_TIMER_IDX] += et - st;
+    timers[GEN_PP_SPMM_TIMER_IDX] += et - st;
     // (3) Calculate ID approximation on the reduced matrix and select skeleton points in X
     st = get_wtime_sec();
     if (krnl_dim == 1)
